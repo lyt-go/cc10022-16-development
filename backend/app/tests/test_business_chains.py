@@ -233,6 +233,58 @@ class TestBusinessChains:
         if sync_result["ok"]:
             assert "synced_count" in sync_result
 
+    # ── 链路7: 清洗规则参考类别→批量标准码转换→分区交付→原批次重跑 ──
+    def test_chain7_reference_code_conversion(self):
+        """字段清洗规则关联参考类别 -> 逐行标准码改写 -> 分区交付 -> 原批次重跑核对。"""
+        ref_svc = MdmReferenceService()
+        # 两个类别共用 01：城市 01 与卡种 01 各自在自己的字典里
+        assert ref_svc.resolve_standard_code("城市", "01")["standard_name"] == "北京市"
+        assert ref_svc.resolve_standard_code("卡种", "01")["standard_name"] == "借记卡"
+
+        cleanse_svc = FieldCleanseService()
+        records = [
+            {"记录编号": "E1", "区域": "东区", "城市": "北京", "卡种": "储蓄卡"},
+            {"记录编号": "E2", "区域": "东区", "城市": "火星", "卡种": "信用卡"},
+            {"记录编号": "W1", "区域": "西区", "城市": "上海", "卡种": "贷记卡"},
+            {"记录编号": "W2", "区域": "西区", "城市": "穗", "卡种": "储值卡"},
+        ]
+        result = cleanse_svc.convert_batch("客户主数据", records)
+        assert result["ok"] is True, f"标准码转换失败: {result}"
+        assert result["converted"] == 7 and result["failed"] == 1, result
+
+        # 每条明细都带字段、类别、原编码和映射结果
+        detail = result["rows"]
+        assert all({"字段", "参考类别", "原编码", "标准编码"} <= set(row) for row in detail), detail
+        east_city = next(r for r in detail if r["记录键"] == "E1" and r["字段"] == "城市")
+        assert east_city["标准编码"] == "01" and east_city["参考类别"] == "城市"
+        missing = next(r for r in detail if r["记录键"] == "E2" and r["字段"] == "城市")
+        assert missing["是否生效"] is False and "未找到" in missing["原因"], missing
+
+        # 分区交付：东区部分可生效，西区全部分区都能转换
+        handoff = cleanse_svc.deliver_conversion_partitions(result["batch_id"])
+        by_partition = {item["分区"]: item for item in handoff["partitions"]}
+        assert by_partition["东区"]["可生效编码"] == ["01", "02"]
+        assert [row["记录键"] for row in by_partition["东区"]["rejected"]] == ["E2"]
+        assert by_partition["西区"]["接收记录数"] == 4
+        assert by_partition["西区"]["rejected"] == []
+
+        # 原批次再操作一次：新码不会被旧别名二次改写，正式数据不叠行
+        formal_before = len(result["formal_records"])
+        rerun = cleanse_svc.rerun_conversion_batch(result["batch_id"])
+        assert rerun["ok"] is True
+        assert rerun["run_no"] == 2
+        converted_back = [
+            row for row in rerun["rows"]
+            if row["处理结果"] in ("already_standard", "converted")
+        ]
+        assert all(row["处理结果"] == "already_standard" for row in converted_back), rerun["rows"]
+        assert len(rerun["formal_records"]) == formal_before, "重跑不应产生重复正式数据"
+
+        # 改码明细可按运行次数回查
+        detail_view = cleanse_svc.query_conversion_detail(result["batch_id"], run_no=1)
+        assert detail_view["run_count"] == 2
+        assert len(detail_view["rows"]) == len(detail)
+
     # ── 链路6: 参考数据→实体模型→质量统计→治理看板 ──
     def test_chain6_reference_to_dashboard(self):
         """参考数据 -> 实体模型校验 -> 质量统计 -> 治理看板。"""
@@ -292,6 +344,7 @@ if __name__ == "__main__":
         ("链路4: 清洗→优胜策略→版本快照", runner.test_chain4_survivorship_to_version),
         ("链路5: 黄金记录→查询接口→分发同步", runner.test_chain5_golden_to_sync),
         ("链路6: 参考数据→实体模型→质量统计→看板", runner.test_chain6_reference_to_dashboard),
+        ("链路7: 参考类别→标准码转换→分区交付→重跑", runner.test_chain7_reference_code_conversion),
     ]
 
     passed = 0

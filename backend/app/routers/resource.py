@@ -8,8 +8,19 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
+from app.schemas import (
+    ActionPayload,
+    ActionResult,
+    ConvertPayload,
+    EntryPayload,
+    PageResult,
+    RerunPayload,
+    ResolveBatchPayload,
+    ResolvePayload,
+)
 from app.services import service_for
+from app.services.field_cleanse import FieldCleanseService
+from app.services.mdm_reference import MdmReferenceService
 
 router = APIRouter(prefix="/api", tags=["业务资源"])
 
@@ -71,6 +82,59 @@ def export_entries(
         iter([output.getvalue()]), media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{module}.csv"'},
     )
+
+
+@router.post("/field_cleanse/convert", response_model=dict)
+def convert_batch(payload: ConvertPayload) -> dict[str, Any]:
+    """批量标准码转换：按清洗规则的参考类别逐行改写并落按分区正式数据。"""
+    service = FieldCleanseService()
+    return service.convert_batch(
+        payload.entity_model,
+        payload.records,
+        rule_id=payload.rule_id,
+        partition_field=payload.partition_field,
+        record_key_field=payload.record_key_field,
+    )
+
+
+@router.get("/field_cleanse/conversions", response_model=dict)
+def list_conversions(entity_model: str | None = Query(default=None),
+                     rule_id: int | None = Query(default=None)) -> dict[str, Any]:
+    """查询标准码转换批次列表。"""
+    service = FieldCleanseService()
+    batches = service.query_conversion_batches(entity_model=entity_model, rule_id=rule_id)
+    return {"items": batches, "total": len(batches)}
+
+
+@router.get("/field_cleanse/conversions/{batch_id}", response_model=dict)
+def get_conversion(batch_id: int, run_no: int | None = Query(default=None)) -> dict[str, Any]:
+    """查询某次转换的逐行改码明细与正式数据。"""
+    return FieldCleanseService().query_conversion_detail(batch_id, run_no=run_no)
+
+
+@router.post("/field_cleanse/conversions/{batch_id}/rerun", response_model=dict)
+def rerun_conversion(batch_id: int, payload: RerunPayload) -> dict[str, Any]:
+    """再操作一次原批次：同一批次号重跑并核对改码明细与正式数据。"""
+    return FieldCleanseService().rerun_conversion_batch(batch_id, input_mode=payload.input_mode)
+
+
+@router.get("/field_cleanse/conversions/{batch_id}/delivery", response_model=dict)
+def deliver_conversion(batch_id: int) -> dict[str, Any]:
+    """按分区交付：报送系统逐分区接收可生效的标准码记录。"""
+    return FieldCleanseService().deliver_conversion_partitions(batch_id)
+
+
+@router.post("/mdm_reference/resolve", response_model=dict)
+def resolve_reference(payload: ResolvePayload) -> dict[str, Any]:
+    """按参考类别解析单个编码：标准码优先，其次别名与映射关系。"""
+    return MdmReferenceService().resolve_standard_code(payload.category, payload.code)
+
+
+@router.post("/mdm_reference/resolve/batch", response_model=dict)
+def resolve_reference_batch(payload: ResolveBatchPayload) -> dict[str, Any]:
+    """批量解析同一类别下的多个编码。"""
+    results = MdmReferenceService().batch_resolve_standard_codes(payload.category, payload.codes)
+    return {"category": payload.category, "items": results, "total": len(results)}
 
 
 @router.get("/{module}/{entry_id}", response_model=dict)

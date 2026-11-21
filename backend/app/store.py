@@ -14,12 +14,18 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        # 辅助表：不参与模块清单统计，用来存放逐行转换明细等运行期产物。
+        self._aux_tables: dict[str, list[dict[str, Any]]] = {}
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
+
+    def aux_rows(self, name: str) -> list[dict[str, Any]]:
+        """运行期辅助表：与 18 个业务模块隔离，避免污染模块统计。"""
+        return self._aux_tables.setdefault(name, [])
 
     def find(self, module: str, entry_id: int) -> dict[str, Any] | None:
         for row in self.rows(module):
